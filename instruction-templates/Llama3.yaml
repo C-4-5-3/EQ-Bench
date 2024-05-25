@@ -1,0 +1,5 @@
+user: ""
+bot: ""
+turn_template: "<|start_header_id|>user<|end_header_id|>\n\n<|user-message|>}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n<|bot|><|bot-message|><|eot_id|>"
+context: "<|start_header_id|>system<|end_header_id|>\n\n<|system-message|><|eot_id|>"
+system_message: "Du bist ein Experte im Analysieren von Emotionen."
