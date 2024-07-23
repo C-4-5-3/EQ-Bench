@@ -298,7 +298,7 @@ class BenchmarkRunner:
 		while is_writing:
 			print('Waiting for writes to complete...')
 			time.sleep(0.1)
-		print('All writes completed. Exiting gracefully.')
+		print('\nAll writes completed. Exiting...')
 
 def main():
 	parser = argparse.ArgumentParser(description="Run benchmark pipeline based on specified configuration.")

@@ -1,8 +1,8 @@
 import json
-from typing import Dict, Any, Tuple
+import datetime
 from benchmarks.base_benchmark import BaseBenchmark
 from lib.run_query import run_query
-from lib.scoring import calculate_score, calculate_score_fullscale, parse_answers, parse_answers_de
+from lib.scoring import calculate_score, calculate_score_fullscale, parse_answers, parse_answers_de, calculate_eq_bench_score
 from lib.util import safe_dump, remove_revision_instructions, gpu_cleanup
 from lib.run_bench_helper_functions import run_test_prompts, format_include_exclude_string
 
@@ -10,8 +10,28 @@ class EQBench(BaseBenchmark):
 	def __init__(self, config, args, benchmark_config, runner):
 		super().__init__(config, args, benchmark_config, runner)
 		self.questions = self.load_questions()
-  
+		self.eqbench_version = "v1" if self.args.v1 else "v2"
 	
+	def get_benchmark_type(self):
+		return 'eq-bench'
+
+	def update_benchmark_specific_metadata(self, metadata):
+		metadata.update({
+			"eq_bench_version": self.eqbench_version,
+			"language": self.args.l,
+			"instruction_template": self.benchmark_config['prompt_type'],
+			"model_path": self.benchmark_config['model_path'],
+			"lora_path": self.benchmark_config['lora_path'],
+			"bitsandbytes_quant": self.benchmark_config['quantization']
+		})
+
+	def get_iteration_template(self):
+		return {
+			'respondent_answers': {},
+			'individual_scores': {},
+			'individual_scores_fullscale': {},
+			'raw_inference': {}
+		}
 
 	def load_questions(self):
 		questions_fn = self.get_questions_filename()
@@ -49,38 +69,27 @@ class EQBench(BaseBenchmark):
 	def run(self):
 		for run_iter in range(1, self.benchmark_config['n_iterations'] + 1):
 			print(f"Iteration {run_iter} of {self.benchmark_config['n_iterations']}")
-			self.initialize_iteration_results(run_iter)
+			self.initialize_results()
 			
 			for question_id, question in self.questions.items():
-					if self.is_question_completed(question_id, run_iter):
-						if self.args.v:
-							print(f"Question {question_id} already complete")
-						continue
-					
-					if not self.runner.model and not self.runner.ooba_instance:
-						self.runner.initialize_model_or_ooba(self.benchmark_config)
-					
-					self.process_question(question_id, question, run_iter)
+				if self.is_question_completed(question_id, run_iter):
+					if self.args.v:
+						print(f"Question {question_id} already complete")
+					continue
+				
+				if not self.runner.model and not self.runner.ooba_instance:
+					self.runner.initialize_model_or_ooba(self.benchmark_config)
+				
+				self.process_question(question_id, question, run_iter)
+		
+				self.save_results()
 
-		self.save_results()
+		self.print_results()
   
 	def is_question_completed(self, question_id, run_iter):
 		return (self.run_index in self.results and
 					str(run_iter) in self.results[self.run_index]['iterations'] and
-					question_id in self.results[self.run_index]['iterations'][str(run_iter)]['individual_scores'])
-
-	def initialize_iteration_results(self, run_iter):
-		if self.run_index not in self.results:
-			self.results[self.run_index] = {
-					'run_metadata': self.create_run_metadata(),
-					'iterations': {}
-			}
-		self.results[self.run_index]['iterations'][str(run_iter)] = {
-			'respondent_answers': {},
-			'individual_scores': {},
-			'individual_scores_fullscale': {},
-			'raw_inference': {}
-		}
+					str(question_id) in self.results[self.run_index]['iterations'][str(run_iter)]['individual_scores'])
 
 	def create_run_metadata(self):
 		return {
@@ -188,10 +197,23 @@ class EQBench(BaseBenchmark):
 		}
 		iter_results['raw_inference'][question_id] = inference
 
-	def calculate_score(self):
-		# This method would calculate the final score across all iterations
-		# For now, we'll leave it as a placeholder
-		pass
+	def print_results(self):
+		formatted_datetime = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+		print(f"----EQ-Bench Benchmark Complete----")
+		print(formatted_datetime)
+		print('Time taken:', round((datetime.datetime.now() - self.start_time).total_seconds() / 60, 1), 'mins')
+		print('Prompt Format:', self.benchmark_config['prompt_type'])
+		print('Model:', self.benchmark_config['model_path'])
+		if self.benchmark_config['lora_path']:
+			print('Lora:', self.benchmark_config['lora_path'])
+
+		lang_suffix = '_' + self.args.l if self.args.l != 'en' else ''
+		score, parseable = calculate_eq_bench_score(self.run_index, self.results, self.RAW_RESULTS_PATH, fullscale=self.eqbench_version == "v2")
+		print(f"Score ({self.eqbench_version}{lang_suffix}):", score)
+		print('Parseable:', parseable)
+
+		if parseable / len(self.questions) < 0.8333:
+			print("! Benchmark Failed: Less than 83.33% of questions were parseable")
 
 	def save_results(self):
 		safe_dump(self.results, './raw_results.json')

@@ -1,5 +1,5 @@
 import json
-from typing import Dict, Any
+import datetime
 from benchmarks.base_benchmark import BaseBenchmark
 from lib.run_query import run_query
 from lib.util import safe_dump
@@ -11,6 +11,24 @@ class CreativeWritingBench(BaseBenchmark):
 		super().__init__(config, args, benchmark_config, runner)
 		self.prompts = self.load_prompts()
 
+	def get_benchmark_type(self):
+		return 'creative-writing'
+
+	def update_benchmark_specific_metadata(self, metadata):
+		metadata.update({
+			"model_path": self.benchmark_config['model_path'],
+			"lora_path": self.benchmark_config['lora_path'],
+			'judge_model': self.config.get('Creative Writing Benchmark', 'judge_model'),
+			"bitsandbytes_quant": self.benchmark_config['quantization']
+		})
+
+	def get_iteration_template(self):
+		return {
+			'individual_scores': {},
+			'test_model_response': {},
+			'judge_model_response': {}
+		}
+		
 	def load_prompts(self):
 		with open('data/creative_writing_prompts_v2.2.json', 'r', encoding='utf-8') as f:
 			return json.load(f)
@@ -37,7 +55,7 @@ class CreativeWritingBench(BaseBenchmark):
 	def run(self):
 		for run_iter in range(1, self.benchmark_config['n_iterations'] + 1):
 			print(f"Iteration {run_iter} of {self.benchmark_config['n_iterations']}")
-			self.initialize_iteration_results(run_iter)
+			self.initialize_results()
 			
 			for prompt_id, prompt_data in self.prompts.items():
 					if self.is_prompt_completed(prompt_id, run_iter):
@@ -51,18 +69,7 @@ class CreativeWritingBench(BaseBenchmark):
 					self.process_prompt(prompt_id, prompt_data, run_iter)
 
 		self.save_results()
-
-	def initialize_iteration_results(self, run_iter):
-		if self.run_index not in self.results:
-			self.results[self.run_index] = {
-					'run_metadata': self.create_run_metadata(),
-					'iterations': {}
-			}
-		self.results[self.run_index]['iterations'][str(run_iter)] = {
-			'individual_scores': {},
-			'test_model_response': {},
-			'judge_model_response': {}
-		}
+		self.print_results()
 
 	def create_run_metadata(self):
 		return {
@@ -115,6 +122,20 @@ class CreativeWritingBench(BaseBenchmark):
 		self.results[self.run_index]['creative_writing_score'] = calculate_creative_writing_score(
 			self.run_index, self.results
 		)
+  
+	def print_results(self):
+		formatted_datetime = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+		print(f"----Creative Writing Benchmark Complete----")
+		print(formatted_datetime)
+		print('Time taken:', round((datetime.datetime.now() - self.start_time).total_seconds() / 60, 1), 'mins')
+		print('Prompt Format:', self.benchmark_config['prompt_type'])
+		print('Model:', self.benchmark_config['model_path'])
+		if self.benchmark_config['lora_path']:
+			print('Lora:', self.benchmark_config['lora_path'])
+
+		score = calculate_creative_writing_score(self.run_index, self.results, self.runner.RAW_RESULTS_PATH)
+		print('Creative Writing Score:', score)
+		print('Judge:', self.config.get('Creative Writing Benchmark', 'judge_model'))
 
 	def save_results(self):
 		safe_dump(self.results, './raw_results.json')
