@@ -310,3 +310,22 @@ def gpu_cleanup():
 		torch.cuda.ipc_collect()
 
 	time.sleep(5)
+ 
+def remove_revision_instructions(prompt, language):
+	# cut out the part of the prompt asking for a revised answer
+	if language == 'en':
+		prompt = prompt.replace(' Then critique your answer by thinking it through step by step. Finally, give your revised scores.', '')
+		prompt = prompt.replace('First pass scores:\n', '')
+		prompt = prompt[:prompt.find('Critique: <your critique here>')] + '\n' + prompt[prompt.find('[End of answer]'):]
+		prompt += '\nYour answer:\n'
+	elif language == 'de':
+		# de translation has some varations that we have to account for.
+		substring_to_match = "Geben Sie jeder dieser möglichen Emotionen"
+		replacement_string = "Geben Sie jeder dieser möglichen Emotionen eine Punktzahl von 0-10 für die relative Intensität, die sie wahrscheinlich fühlen werden."
+		start_index = prompt.find(substring_to_match)
+		end_index = prompt.find('\n', start_index)		
+		prompt = prompt[:start_index] + replacement_string + prompt[end_index:]
+		prompt = prompt.replace('Erste Bewertung:\n', '')
+		prompt = prompt[:prompt.find('Kritik: <Ihre Kritik hier>')] + '\n' + prompt[prompt.find('[Ende der Antwort]'):]
+		prompt += '\nIhre Antwort:\n'	
+	return prompt

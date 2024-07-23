@@ -1,268 +1,332 @@
 import argparse
-import configparser
 import os
 import time
-from lib.util import parse_batch, is_int, preprocess_config_string, revert_placeholders_in_config, is_writing, gpu_cleanup
-import lib.db
+import io
 import signal
 import sys
-import io
+import datetime
+import csv
+import openai
+from typing import List, Dict, Any, Tuple
+from benchmarks.base_benchmark import BaseBenchmark
+from benchmarks.eq_bench import EQBench
+from benchmarks.creative_writing_bench import CreativeWritingBench
+from benchmarks.judgemark_bench import JudemarkBench
+from benchmarks.config_handler import ConfigHandler
+from lib.util import parse_batch, preprocess_config_string, revert_placeholders_in_config, is_writing, gpu_cleanup, upload_results_google_sheets
+import lib.db
+from lib.scoring import calculate_eq_bench_score, calculate_creative_writing_score
+from lib.db import save_eq_bench_result_to_db, save_creative_writing_result_to_db, save_judgemark_result_to_db
+from lib.util import gpu_cleanup, delete_symlinks_and_dir
+from lib.run_bench_helper_functions import format_include_exclude_string
+from lib.load_model import load_model
+import lib.ooba
 
+project_root = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, project_root)
 
-ooba_instance = None
+BENCH_RESULTS_PATH = './benchmark_results.csv'
 
-def cleanup():	
-	while is_writing:
-		print('Waiting for writes to complete...')
-		time.sleep(0.1)
-	print('All writes completed. Exiting gracefully.')
+class BenchmarkRunner:
+	def __init__(self, config, args):
+		self.config = config
+		self.args = args
+		self.model = None
+		self.tokenizer = None
+		self.ooba_instance = None
+		self.models_to_delete = {}
+		self.models_remaining = []
+		self.openai_client = self.setup_openai_client()
 
+	def run(self):
+		self.setup_environment()
+		parsed_batch = self.prepare_batch()
+		self.run_benchmarks(parsed_batch)
+  
+	def setup_openai_client(self):
+		api_key = self.config.get('OpenAI', 'api_key', '')
+		base_url = 'https://api.openai.com/v1/'
+		alt_url = self.config.get('OpenAI', 'openai_compatible_url', '')
+		
+		if alt_url:
+			base_url = alt_url
 
-# Function to handle SIGINT
-def signal_handler(sig, frame):
-	global ooba_instance
-	if ooba_instance:
-		print('Stopping ooba...')
-		ooba_instance.stop()
-	# Wait a moment for any writes to finish	
-	time.sleep(2)
-	cleanup()
-	sys.exit(0)
+		if api_key:
+			return openai.OpenAI(
+					api_key=api_key,
+					base_url=base_url
+			)
+		return None
 
-signal.signal(signal.SIGINT, signal_handler)
+	def setup_environment(self):
+		# Set up environment variables and configurations
+		os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = '1' if self.args.f else '0'
+		if self.config.get('Huggingface', 'access_token'):
+			os.environ["HF_TOKEN"] = self.config.get('Huggingface', 'access_token')
+			from huggingface_hub import login
+			login(token=self.config.get('Huggingface', 'access_token'))
+		if os.path.exists('./firebase_creds.json'):
+			os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.abspath('./firebase_creds.json')
+			lib.db.init_db()
 
-def str2bool(v):
-	if isinstance(v, bool):
-		return v
-	if v.lower() in ('yes', 'true', 't', 'y', '1'):
-		return True
-	elif v.lower() in ('no', 'false', 'f', 'n', '0'):
-		return False
-	else:
-		return False
+	def prepare_batch(self) -> List[Dict[str, Any]]:
+		preprocessed_benchmark_runs = revert_placeholders_in_config(self.config['Benchmarks to run'])
+		return parse_batch(preprocessed_benchmark_runs, 
+								self.config.get('Oobabooga config', 'ooba_launch_script'),
+								self.config.get_bool('Oobabooga config', 'automatically_launch_ooba'))
+
+	def run_benchmarks(self, parsed_batch: List[Tuple]):
+		start_time = time.time()
+		for i, batch_item in enumerate(parsed_batch, 1):
+			(run_id, prompt_type, model_path, lora_path, quantization, 
+				n_iterations, inference_engine, ooba_params, include_patterns, exclude_patterns) = batch_item
+
+			print(f'--------------\nRunning benchmark {i} of {len(parsed_batch)}\n')
+			print(model_path)
+			if lora_path:
+					print(lora_path)
+			print('--------------')
+
+			benchmark_config = {
+					'run_id': run_id,
+					'prompt_type': prompt_type,
+					'model_path': model_path,
+					'lora_path': lora_path,
+					'quantization': quantization,
+					'n_iterations': n_iterations,
+					'inference_engine': inference_engine,
+					'ooba_params': ooba_params,
+					'include_patterns': include_patterns,
+					'exclude_patterns': exclude_patterns
+			}
+
+			self.prepare_model_deletion(benchmark_config)
+
+			try:
+					for benchmark_type in self.args.benchmarks:
+						benchmark = self.create_benchmark(benchmark_type, benchmark_config)
+						benchmark.run()
+						self.save_and_upload_results(benchmark, benchmark_type, benchmark_config)
+			except KeyboardInterrupt:
+					self.cleanup(benchmark_config)
+					raise
+			except Exception as e:
+					print(e)
+					self.cleanup(benchmark_config)
+
+			self.cleanup(benchmark_config)
+			self.models_remaining = self.models_remaining[1:]
+
+		end_time = time.time()
+		print('---------------')
+		print('Batch completed')
+		print('Time taken:', round((end_time - start_time) / 60, 1), 'mins')
+		print('---------------')
+
+	def save_and_upload_results(self, benchmark, benchmark_type, benchmark_config):
+		formatted_datetime = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+		run_id = benchmark_config['run_id']
+		model_path = benchmark_config['model_path']
+		lora_path = benchmark_config['lora_path']
+		prompt_type = benchmark_config['prompt_type']
+		quantization = benchmark_config['quantization']
+		inference_engine = benchmark_config['inference_engine']
+		ooba_params = benchmark_config['ooba_params']
+		include_patterns = benchmark_config['include_patterns']
+		exclude_patterns = benchmark_config['exclude_patterns']
+
+		# Calculate score based on benchmark type
+		if benchmark_type == 'eq-bench':
+			score, parseable = calculate_eq_bench_score(benchmark.run_index, benchmark.results, './raw_results.json', fullscale=not self.args.v1)
+			benchmark_version = f"{benchmark_type}_{'v1' if self.args.v1 else 'v2'}{self.args.l if self.args.l != 'en' else ''}"
+		elif benchmark_type == 'creative-writing':
+			score = calculate_creative_writing_score(benchmark.run_index, benchmark.results, './raw_results.json')
+			parseable = 'N/A'
+			benchmark_version = 'creative-writing'
+		elif benchmark_type == 'judgemark':
+			score = benchmark.results[benchmark.run_index]['judgemark_results']['mean_score']
+			parseable = 'N/A'
+			benchmark_version = 'judgemark'
+
+		# Prepare result data
+		result_data = [
+			run_id,
+			formatted_datetime,
+			prompt_type,
+			model_path,
+			lora_path,
+			quantization,
+			round(score, 2) if score is not None else 'FAILED',
+			benchmark_version,
+			parseable,
+			benchmark.benchmark_config['n_iterations'],
+			inference_engine,
+			ooba_params,
+			format_include_exclude_string(include_patterns, exclude_patterns),
+			''  # Error field, empty if successful
+		]
+
+		# Save to CSV
+		self.save_to_csv(result_data)
+
+		# Upload to Google Sheets
+		google_spreadsheet_url = self.config.get('Results upload', 'google_spreadsheet_url')
+		if google_spreadsheet_url and os.path.exists('./google_creds.json'):
+			upload_results_google_sheets(google_spreadsheet_url, result_data)
+
+		# Save to database
+		self.save_to_database(benchmark, benchmark_type, score, parseable)
+
+	def prepare_model_deletion(self, benchmark_config):
+		model_path = benchmark_config['model_path']
+		include_patterns = benchmark_config['include_patterns']
+		exclude_patterns = benchmark_config['exclude_patterns']
+		if model_path and not os.path.exists(model_path):
+			this_model_key = model_path + '_' + ','.join(include_patterns) + '_' + ','.join(exclude_patterns)
+			if self.args.d:
+					self.models_to_delete[this_model_key] = True
+			self.models_remaining.append(this_model_key)
+
+	def save_to_csv(self, result_data):
+		file_exists = os.path.isfile(BENCH_RESULTS_PATH)
+		
+		with open(BENCH_RESULTS_PATH, 'a', newline='', encoding='utf-8') as f:
+			writer = csv.writer(f)
+			if not file_exists:
+				writer.writerow([
+						'Run ID', 'Timestamp', 'Prompt Format', 'Model Path', 'Lora Path', 
+						'Quantization', 'Benchmark Score', 'Benchmark Version', 
+						'Num Questions Parseable', 'Num Iterations', 'Inference Engine', 
+						'Ooba Params', 'Download Filters', 'Error'
+				])
+			writer.writerow(result_data)
+
+	def save_to_database(self, benchmark, benchmark_type, score, parseable):
+		if benchmark_type == 'eq-bench':
+			save_eq_bench_result_to_db(benchmark.results[benchmark.run_index], score, parseable, '', benchmark.run_index, True)
+		elif benchmark_type == 'creative-writing':
+			save_creative_writing_result_to_db(benchmark.results[benchmark.run_index], score, 'N/A', '', benchmark.run_index, True)
+		elif benchmark_type == 'judgemark':
+			save_judgemark_result_to_db(benchmark.results[benchmark.run_index], score, 'N/A', '', benchmark.run_index, True)
+   
+	def create_benchmark(self, benchmark_type: str, benchmark_config: Dict[str, Any]) -> BaseBenchmark:
+		if benchmark_type == 'eq-bench':
+			return EQBench(self.config, self.args, benchmark_config, self)
+		elif benchmark_type == 'creative-writing':
+			return CreativeWritingBench(self.config, self.args, benchmark_config, self)
+		elif benchmark_type == 'judgemark':
+			return JudemarkBench(self.config, self.args, benchmark_config, self)
+		else:
+			raise ValueError(f"Invalid benchmark type: {benchmark_type}")
+
+	def initialize_model_or_ooba(self, benchmark_config):
+		inference_engine = benchmark_config['inference_engine']
+		model_path = benchmark_config['model_path']
+		lora_path = benchmark_config['lora_path']
+		quantization = benchmark_config['quantization']
+
+		if inference_engine == 'transformers' and self.model is None:
+			self.model, self.tokenizer = load_model(model_path, lora_path, quantization, trust_remote_code=self.config.get_bool('Options', 'trust_remote_code', False))
+		elif inference_engine == 'ooba' and self.ooba_instance is None:
+			ooba_launch_script = self.config.get('Oobabooga config', 'ooba_launch_script')
+			if not ooba_launch_script:
+					raise ValueError("ooba_launch_script not set in config")
+			
+			self.ooba_instance = lib.ooba.Ooba(
+					ooba_launch_script, model_path, 
+					self.config.get('Huggingface', 'cache_dir'), 
+					self.args.v,
+					trust_remote_code=self.config.get_bool('Options', 'trust_remote_code', False),
+					ooba_args_global=self.config.get('Oobabooga config', 'ooba_params_global', ''),
+					ooba_args=benchmark_config['ooba_params'],
+					fast_download=self.args.f,
+					include_patterns=benchmark_config['include_patterns'],
+					exclude_patterns=benchmark_config['exclude_patterns'],
+					hf_access_token=self.config.get('Huggingface', 'access_token')
+			)
+			ooba_started_ok = self.ooba_instance.start()
+			if not ooba_started_ok:
+					raise Exception("Ooba failed to launch.")
+
+	def cleanup(self, benchmark_config):
+		inference_engine = benchmark_config['inference_engine']
+		model_path = benchmark_config['model_path']
+		include_patterns = benchmark_config['include_patterns']
+		exclude_patterns = benchmark_config['exclude_patterns']
+
+		if self.model:
+			del self.model
+			self.model = None
+		if self.tokenizer:
+			del self.tokenizer
+			self.tokenizer = None
+		if inference_engine == 'ooba' and self.ooba_instance:
+			try:
+					self.ooba_instance.stop()
+			except Exception as e:
+					pass
+			self.ooba_instance = None
+
+		if self.args.d and self.models_to_delete:
+			this_model_key = model_path + '_' + ','.join(include_patterns) + '_' + ','.join(exclude_patterns)
+			if model_path and this_model_key in self.models_to_delete and this_model_key not in self.models_remaining[1:]:
+					if inference_engine == 'transformers':
+						dir_to_delete = os.path.expanduser('~/.cache/huggingface/hub/models--' + model_path.replace('/', '--').replace('\\', '--'))
+						if os.path.exists(dir_to_delete):
+							delete_symlinks_and_dir(dir_to_delete, self.args.v)
+						else:
+							print('! Cache not found:', dir_to_delete)
+					elif inference_engine == 'ooba':
+						if self.ooba_instance and self.ooba_instance.model_downloaded_fullpath:
+							dir_to_delete = self.ooba_instance.model_downloaded_fullpath
+							if os.path.exists(dir_to_delete):
+									delete_symlinks_and_dir(dir_to_delete, self.args.v)
+							else:
+									print('! Cache not found:', dir_to_delete)
+
+		gpu_cleanup()
+
+	def final_cleanup(self):
+		if self.ooba_instance:
+			print('Stopping ooba...')
+			self.ooba_instance.stop()
+		time.sleep(2)
+		self.model = None
+		self.tokenizer = None
+		self.ooba_instance = None
+		gpu_cleanup()
+		while is_writing:
+			print('Waiting for writes to complete...')
+			time.sleep(0.1)
+		print('All writes completed. Exiting gracefully.')
 
 def main():
-	global ooba_instance
+	parser = argparse.ArgumentParser(description="Run benchmark pipeline based on specified configuration.")
+	parser.add_argument('-v1', action='store_true', help="Run v1 of EQ-Bench (legacy).")
+	parser.add_argument('-revise', action='store_true', help="Include the revision component of the test.")
+	parser.add_argument('--benchmarks', nargs='+', default=['eq-bench'],
+							help="Specify the benchmark types to run.")
+	parser.add_argument('-w', action='store_true', help="Overwrites existing results.")
+	parser.add_argument('-d', action='store_true', help="Delete downloaded models after benchmark.")
+	parser.add_argument('-f', action='store_true', help="Use hftransfer for downloading models.")
+	parser.add_argument('-v', action='store_true', help="Display more verbose output.")
+	parser.add_argument('-l', default='en', help="Set the language of the question dataset.")
+	parser.add_argument('-r', type=int, default=5, help="Set the number of retries for failed benchmark runs.")
+	args = parser.parse_args()
 
-	# Preprocess the configuration content
 	config_content = preprocess_config_string('config.cfg')
 	config_file_iostream = io.StringIO(config_content)
+	config = ConfigHandler(config_file_iostream)
 
-	# Argument parser setup
-	parser = argparse.ArgumentParser(description="Run benchmark pipeline based on specified configuration.")	
-	parser.add_argument('-v1', action='store_true', help="Run v1 of EQ-Bench (legacy). V1 has been superseded and results are not directly comparable to v2 results.")
-	parser.add_argument('-revise', action='store_true', help="Include the revision component of the test (off by default since v2.1).")
-	parser.add_argument('--benchmarks', nargs='+', default=['eq-bench'],
-                        help="Specify the benchmark types to run <eq-bench|creative-writing|judgemark> separated by comma.")
-	parser.add_argument('-w', action='store_true',
-							help="Overwrites existing results (i.e. disables the default behaviour of resuming a partially completed run).")
-	parser.add_argument('-d', action='store_true',
-							help="Downloaded models will be deleted after each benchmark successfully completes. Does not affect previously downloaded models specified with a local path.")
-	parser.add_argument('-f', action='store_true',
-							help="Use hftransfer for multithreaded downloading of models (faster but can be unreliable).")	
-	parser.add_argument('-v', action='store_true',
-							help="Display more verbose output.")
-	parser.add_argument('-l', default='en',
-							help="Set the language of the question dataset. Currently supported: en, de")
-	parser.add_argument('-r', type=int, default=5,
-							help="Set the number of retries to attempt if a benchmark run fails. Default 5.")
-	args = parser.parse_args()
-	resume = not args.w
+	runner = BenchmarkRunner(config, args)
 
-	if args.f:
-		os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = '1'
-	else:
-		os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = '0'
+	def signal_handler(sig, frame):
+		runner.final_cleanup()
+		sys.exit(0)
 
-	if args.revise:
-		REVISE=True
-	else:
-		REVISE=False
+	signal.signal(signal.SIGINT, signal_handler)
 
-	# This has to be imported AFTER hf_transfer env var is set.
-	from lib.run_bench import run_benchmark
-	import openai
-
-	# Load the configuration
-	# These options allow case sensitive keys, which we need to preserve the case of model paths
-	config = configparser.RawConfigParser(allow_no_value=True)
-	config.optionxform = str
-	config.read_file(config_file_iostream)
-
-	# Revert the placeholders to colons in the parsed configuration
-	preprocessed_benchmark_runs = revert_placeholders_in_config(config['Benchmarks to run'])
-
-	language = "en"
-	if args.l:  # If language is provided via command line argument
-		language = args.l.strip()
-	
-	if language not in ['en', 'de']:
-		raise Exception('Invalid language value specified.')
-	
-	questions_fn = './data/eq_bench_v2_questions_171.json'
-	if args.v1:
-		if language != "en":
-			raise Exception('Error: Only English language is supported for EQ-Bench v1.')
-		questions_fn = './data/eq_bench_v1_questions_60.json'
-
-	if language != 'en':
-		# Extracting the filename and extension
-		base_filename, extension = questions_fn.rsplit('.', 1)
-		# Appending language denotifier
-		questions_fn = f"{base_filename}_{language}.{extension}"
-
-	# Creative writing Judge params
-	judge_params = {
-		'judge_model_api': config['Creative Writing Benchmark'].get('judge_model_api', None),
-		'judge_model': config['Creative Writing Benchmark'].get('judge_model', None),
-		'judge_model_api_key': config['Creative Writing Benchmark'].get('judge_model_api_key', None)
-	}
-
-	# Check for OpenAI fields	
-	api_key = config['OpenAI'].get('api_key', '')	
-	base_url = 'https://api.openai.com/v1/'	
-	alt_url = config['OpenAI'].get('openai_compatible_url', '')
-	
-	if alt_url:
-		base_url = alt_url
-
-	# If OpenAI credentials are provided, set them
-	openai_client = None
-	if api_key:
-		openai_client = openai.OpenAI(
-			api_key=api_key,
-			base_url=base_url
-		)
-
-	# Check for huggingface access token
-	hf_access_token = config['Huggingface'].get('access_token', '')
-	if hf_access_token:
-		# Set env var for the ooba downloader script
-		os.environ["HF_TOKEN"] = hf_access_token
-				
-		# Login to hf hub
-		from huggingface_hub import login
-		login(token = hf_access_token)
-
-	# Check for google sheets share url
-	google_spreadsheet_url  = config['Results upload'].get('google_spreadsheet_url', '')
-
-	# Check for firebase creds
-	if os.path.exists('./firebase_creds.json'):
-		os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.abspath('./firebase_creds.json')
-		lib.db.init_db()
-	
-	cache_dir = config['Huggingface'].get('cache_dir', '')
-	if not cache_dir:
-		cache_dir = None
-
-	ooba_launch_script = config['Oobabooga config'].get('ooba_launch_script', '')	
-	if ooba_launch_script:
-		ooba_launch_script = os.path.abspath(os.path.expanduser(ooba_launch_script))
-		if not os.path.exists(ooba_launch_script):
-			raise Exception("Ooobabooga launch script not found in file system: " + ooba_launch_script)
-	
-	ooba_params_global = config['Oobabooga config'].get('ooba_params_global', '')
-
-	launch_ooba = config['Oobabooga config'].get('automatically_launch_ooba', '')
-	if not launch_ooba:
-		launch_ooba = True
-	else:
-		if launch_ooba.lower() == 'true':
-			launch_ooba = True
-		elif launch_ooba.lower() == 'false':
-			launch_ooba = False
-		else:
-			raise Exception('Invalid value for automatically_launch_ooba in config.cfg')
-
-	trust_remote_code = config['Options'].get('trust_remote_code')
-	if not trust_remote_code:
-		trust_remote_code = False
-	else:
-		if trust_remote_code.lower() == 'true':
-			trust_remote_code = True
-		elif trust_remote_code.lower() == 'false':
-			trust_remote_code = False
-		else:
-			raise Exception('Invalid trust_remote_code value in config.cfg')
-		
-	ooba_request_timeout = config['Oobabooga config'].get('ooba_request_timeout')
-	if not ooba_request_timeout:
-		ooba_request_timeout = 300
-	else:
-		if not is_int(ooba_request_timeout):
-			raise Exception('Invalid ooba_request_timeout value in config.cfg')
-		ooba_request_timeout = int(ooba_request_timeout)
-
-
-	# Run benchmarks based on the config
-	n_benchmarks = 0
-	start_time = time.time()
-	parsed_batch = parse_batch(preprocessed_benchmark_runs, ooba_launch_script, launch_ooba)
-
-	# Make dict of models that need to be deleted
-	models_to_delete = {}
-	models_remaining = []
-	
-	for run_id, prompt_type, model_path, lora_path, quantization, n_iterations, \
-	inference_engine, ooba_params, include_patterns, exclude_patterns in parsed_batch:
-		if model_path and not os.path.exists(model_path):
-			# We only want to delete model files if they won't be used in a later benchmark.
-			# We also need to make sure we clear out the model dir if we are benchmarking the same model
-			# again but with e.g. different .gguf files.
-			this_model_key = model_path+'_'+','.join(include_patterns)+'_'+','.join(exclude_patterns)
-			if args.d:
-				models_to_delete[this_model_key] = True
-			models_remaining.append(this_model_key)
-
-	for run_id, prompt_type, model_path, lora_path, quantization, n_iterations, \
-		inference_engine, ooba_params, include_patterns, exclude_patterns in parsed_batch:
-		# Call the run_benchmark function
-		print('--------------')
-		print('Running benchmark', n_benchmarks + 1, 'of', len(parsed_batch))
-		print('')
-		print(model_path)
-		n_benchmarks += 1
-		if lora_path:
-			print(lora_path)
-		print('--------------')
-		ooba_instance = None
-
-		try:
-			run_benchmark(run_id, model_path, lora_path, prompt_type, quantization, 
-								n_iterations, resume=resume, delete_cache=args.d, 
-								max_bench_retries=args.r, n_question_attempts=3, 
-								verbose=args.v, google_spreadsheet_url=google_spreadsheet_url, 
-								trust_remote_code=trust_remote_code, 
-								inference_engine=inference_engine, ooba_instance=ooba_instance, 
-								launch_ooba = launch_ooba, cache_dir=cache_dir,
-								models_to_delete=models_to_delete, models_remaining=models_remaining,
-								ooba_launch_script=ooba_launch_script, ooba_params=ooba_params,
-								include_patterns=include_patterns, exclude_patterns=exclude_patterns,
-								ooba_params_global=ooba_params_global, fast_download=args.f,
-								hf_access_token=hf_access_token, ooba_request_timeout=ooba_request_timeout,
-								questions_fn=questions_fn, openai_client=openai_client, language=language,
-								REVISE=REVISE, benchmark_types=args.benchmarks, judge_params = judge_params)
-		except KeyboardInterrupt:
-			if ooba_instance:
-				ooba_instance.stop()
-			gpu_cleanup()
-			raise
-		except Exception as e:
-			print(e)
-			gpu_cleanup()
-
-		if ooba_instance:
-			ooba_instance.stop()
-			gpu_cleanup()
-
-		models_remaining = models_remaining[1:]
-
-	print('---------------')
-	print('Batch completed')
-	print('Time taken:', round((time.time()-start_time)/60, 1), 'mins')
-	print('---------------')
-		
+	runner.run()
 
 if __name__ == '__main__':
 	main()

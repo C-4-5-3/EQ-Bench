@@ -147,7 +147,6 @@ def calculate_score(reference, user):
 
 # Calculate overall benchmark score
 def calculate_eq_bench_score(run_index, results, results_path, fullscale=False):
-	global is_writing
 	# We calculate an overall score for first pass answers and revised answers separately.
 	# The final score is the best of these two numbers.
 
