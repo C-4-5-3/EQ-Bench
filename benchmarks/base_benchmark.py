@@ -49,6 +49,8 @@ class BaseBenchmark:
 					self.results = json.load(f)
 			if self.get_benchmark_type() == 'eq-bench':
 					self.results = fix_results(self.results)
+		else:
+			self.results = {}
 
 		if self.run_index not in self.results:
 			self.results[self.run_index] = {
@@ -64,9 +66,10 @@ class BaseBenchmark:
 					'iterations': {}
 			}
 			self.update_benchmark_specific_metadata(self.results[self.run_index]['run_metadata'])
+		else:
+			self.results[self.run_index]["run_metadata"]["total_iterations"] = self.benchmark_config['n_iterations']
 
-		self.initialize_iterations(self.results)
-		print(f"BaseBenchmark initialize_results: {self.results.keys()}")
+		self.initialize_iterations(self.results)		
 		return
 
 	def initialize_iterations(self, results):

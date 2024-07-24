@@ -145,50 +145,205 @@ def calculate_score(reference, user):
 	
 	return final_score
 
-# Calculate the overall eq-bench score
+def calculate_item_score_v3(reference, user):
+	if not user:
+		return None
+	
+	total_difference = 0
+	total_items = 0
+	
+	for key, ref_values in reference.items():
+		if key in user:
+			if isinstance(ref_values, dict):  # For conflict dialogue
+					for emotion, ref_score in ref_values.items():
+						if emotion in user[key]:
+							user_score = float(user[key][emotion])
+							ref_score = float(ref_score)
+							difference = abs(user_score - ref_score)
+							scaled_difference = scale_difference(difference)
+							total_difference += scaled_difference
+							total_items += 1
+			else:  # For template questions
+					user_score = float(user[key])
+					ref_score = float(ref_values)
+					difference = abs(user_score - ref_score)
+					scaled_difference = scale_difference(difference)
+					total_difference += scaled_difference
+					total_items += 1
+	
+	if total_items == 0:
+		return None
+	
+	#average_difference = total_difference / total_items
+	
+	# Inverting the difference so that closer answers get higher scores
+
+	# no S-scaling:
+	# 0.512695
+	# with S-scaling:
+	# 0.634277
+
+	adjust_const = 0.634277
+	final_score = 10 - (total_difference * adjust_const)
+	
+	return final_score
+
+def scale_difference(difference):	
+	if difference == 0:
+		return 0
+	elif difference <= 5:
+		return 6.5 * (1 / (1 + math.e ** (-1.2 * (difference-4))))
+	else:
+		return difference
+
 def calculate_eq_bench_score(run_index, results, results_path, version="v2"):
-	score_tally = 0    
+	score_tally = 0
 	parseable_tally = 0
+	total_items = 0
 	n_iterations = results[run_index]['run_metadata']['total_iterations']
 	n_iterations_tallied = 0
 
-	for run_iter in results[run_index]['iterations']:        
+	for run_iter in results[run_index]['iterations']:
 		if n_iterations_tallied >= n_iterations:
 			break
-		
-		score_sum = 0
-		parseable = 0
 
-		for dialogue_id, r in results[run_index]['iterations'][run_iter]['respondent_answers'].items():
+		iteration_score_sum = 0
+		iteration_parseable = 0
+		iteration_total_items = 0
+
+		for dialogue_id, scores in results[run_index]['iterations'][run_iter]['individual_scores'].items():
 			if version == "v3":
-					# For v3, each dialogue can have multiple scores
-					dialogue_scores = [score for score in r if score is not None]
-					if dialogue_scores:
-						score_sum += sum(dialogue_scores) / len(dialogue_scores)
-						parseable += 1
-			else:
-					if r is not None:
-						score_sum += r
-						parseable += 1
+					# Handle v3 scoring
+					dialogue_score_sum = 0
+					dialogue_parseable = 0
+					dialogue_total_items = 0
 
-		if parseable:
-			iteration_score = 100 * (score_sum / parseable / 10)
-		else:
-			iteration_score = 0
-		
-		score_tally += iteration_score
-		parseable_tally += parseable
+					for question_type in ['conflict_dialogue', 'template_questions']:
+						if question_type in scores:
+							for score in scores[question_type]:
+									if score is not None:
+										dialogue_score_sum += score
+										dialogue_parseable += 1
+									dialogue_total_items += 1
+
+					if dialogue_total_items > 0:
+						iteration_score_sum += dialogue_score_sum
+						iteration_parseable += dialogue_parseable
+						iteration_total_items += dialogue_total_items
+			else:
+					# Handle v1 and v2 scoring
+					if scores is not None:
+						iteration_score_sum += scores
+						iteration_parseable += 1
+					iteration_total_items += 1
+
+		if iteration_total_items > 0:
+			iteration_score = 100 * (iteration_score_sum / iteration_total_items / 10)
+			score_tally += iteration_score
+			parseable_tally += iteration_parseable
+			total_items += iteration_total_items
 
 		results[run_index]['iterations'][run_iter]['benchmark_results'] = {
 			'score': iteration_score,
-			'parseable': parseable
+			'parseable': iteration_parseable,
+			'total_items': iteration_total_items
 		}
 
 		n_iterations_tallied += 1
 
-	averaged_score = score_tally / n_iterations
-	averaged_score = round(averaged_score, 2)
-	
+	if n_iterations_tallied > 0 and total_items > 0:
+		averaged_score = score_tally / n_iterations_tallied
+		averaged_score = round(averaged_score, 2)
+		parseable_ratio = parseable_tally / total_items
+	else:
+		averaged_score = 0
+		parseable_ratio = 0
+
+	safe_dump(results, results_path, max_retries=3)
+
+	return (averaged_score, round(parseable_tally / n_iterations, 2))
+
+
+## !!
+## REPLACE ME with the version above before releasing.
+def calculate_eq_bench_score(run_index, results, results_path, questions, version="v2"):
+	score_tally = 0
+	parseable_tally = 0
+	total_items = 0
+	n_iterations = results[run_index]['run_metadata']['total_iterations']
+	n_iterations_tallied = 0
+
+	for run_iter in results[run_index]['iterations']:
+		if n_iterations_tallied >= n_iterations:
+			break
+
+		iteration_score_sum = 0
+		iteration_parseable = 0
+		iteration_total_items = 0
+
+		for dialogue_id, dialogue_data in results[run_index]['iterations'][run_iter]['respondent_answers'].items():
+			if version == "v3":
+					# Handle v3 scoring
+					dialogue_score_sum = 0
+					dialogue_parseable = 0
+					dialogue_total_items = 0
+
+					#for question_type in ['conflict_dialogue', 'template_questions']:
+					for question_type in ['conflict_dialogue']:
+						if question_type in dialogue_data:
+							reference_answers = questions[dialogue_id][f'reference_answers_{question_type}']
+							for i, (inference, reference) in enumerate(zip(dialogue_data[question_type], reference_answers)):
+									if inference is not None:
+										if question_type == 'conflict_dialogue':
+											reference = reference['reference_answer']
+										else:
+											reference = reference['options']
+										
+										score = calculate_item_score_v3(reference, inference)
+										if score is not None:
+											dialogue_score_sum += score
+											dialogue_parseable += 1
+									dialogue_total_items += 1
+
+					if dialogue_total_items > 0:
+						iteration_score_sum += dialogue_score_sum
+						iteration_parseable += dialogue_parseable
+						iteration_total_items += dialogue_total_items
+			else:
+					# haven't implemented recalc of v1/v2
+					1/0
+					# Handle v1 and v2 scoring
+					reference = results[run_index]['questions'][dialogue_id]['reference_answer']
+					inference = dialogue_data
+					if inference is not None:
+						score = calculate_score_v3(reference, inference)  # Use v3 scoring for consistency
+						if score is not None:
+							iteration_score_sum += score
+							iteration_parseable += 1
+					iteration_total_items += 1
+
+		if iteration_total_items > 0:
+			iteration_score = 100 * (iteration_score_sum / iteration_total_items / 10)
+			score_tally += iteration_score
+			parseable_tally += iteration_parseable
+			total_items += iteration_total_items
+
+		results[run_index]['iterations'][run_iter]['benchmark_results'] = {
+			'score': iteration_score,
+			'parseable': iteration_parseable,
+			'total_items': iteration_total_items
+		}
+
+		n_iterations_tallied += 1
+
+	if n_iterations_tallied > 0 and total_items > 0:
+		averaged_score = score_tally / n_iterations_tallied
+		averaged_score = round(averaged_score, 2)
+		parseable_ratio = parseable_tally / total_items
+	else:
+		averaged_score = 0
+		parseable_ratio = 0
+
 	safe_dump(results, results_path, max_retries=3)
 
 	return (averaged_score, round(parseable_tally / n_iterations, 2))

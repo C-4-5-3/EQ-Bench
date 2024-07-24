@@ -26,6 +26,7 @@ project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, project_root)
 
 BENCH_RESULTS_PATH = './benchmark_results.csv'
+DEBUG=True
 
 class BenchmarkRunner:
 	def __init__(self, config, args):
@@ -36,20 +37,25 @@ class BenchmarkRunner:
 		self.ooba_instance = None
 		self.models_to_delete = {}
 		self.models_remaining = []
-		self.openai_client = self.setup_openai_client()
+		self.openai_client = None
 
 	def run(self):
 		self.setup_environment()
 		parsed_batch = self.prepare_batch()
 		self.run_benchmarks(parsed_batch)
   
-	def setup_openai_client(self):
+	def setup_openai_client(self, str_to_replace='', replace_with=''):
 		api_key = self.config.get('OpenAI', 'api_key', '')
-		base_url = 'https://api.openai.com/v1/'
-		alt_url = self.config.get('OpenAI', 'openai_compatible_url', '')
+		base_url = 'https://api.openai.com/v1/'		
+		alt_url = self.config.get('OpenAI', 'openai_compatible_url', '')		
 		
 		if alt_url:
+			if str_to_replace:
+				alt_url = alt_url.replace(str_to_replace, replace_with)
 			base_url = alt_url
+			print('base_url', base_url)
+
+		
 
 		if api_key:
 			return openai.OpenAI(
@@ -87,6 +93,14 @@ class BenchmarkRunner:
 					print(lora_path)
 			print('--------------')
 
+			# This is here because huggingface pro api uses the model in the api url
+			openai_compatible_url = self.config.get('OpenAI', 'openai_compatible_url', '')
+			if inference_engine == 'openai' and openai_compatible_url and 'https://api-inference.huggingface.co' in openai_compatible_url:
+				self.openai_client = None
+				self.openai_client = self.setup_openai_client(str_to_replace='<MODEL>', replace_with=model_path)
+			if not self.openai_client:
+				self.openai_client = self.setup_openai_client()
+
 			benchmark_config = {
 					'run_id': run_id,
 					'prompt_type': prompt_type,
@@ -102,17 +116,28 @@ class BenchmarkRunner:
 
 			self.prepare_model_deletion(benchmark_config)
 
-			try:
-					for benchmark_type in self.args.benchmarks:
+			if DEBUG:
+				# Debug mode: let errors propagate
+				for benchmark_type in self.args.benchmarks:
 						benchmark = self.create_benchmark(benchmark_type, benchmark_config)
 						benchmark.run()
 						self.save_and_upload_results(benchmark, benchmark_type, benchmark_config)
-			except KeyboardInterrupt:
-					self.cleanup(benchmark_config)
-					raise
-			except Exception as e:
-					print(e)
-					self.cleanup(benchmark_config)
+				self.cleanup(benchmark_config)
+			else:
+					# Normal mode: use try-except blocks
+					try:
+						for benchmark_type in self.args.benchmarks:
+							benchmark = self.create_benchmark(benchmark_type, benchmark_config)
+							benchmark.run()
+							self.save_and_upload_results(benchmark, benchmark_type, benchmark_config)
+					except KeyboardInterrupt:
+						self.cleanup(benchmark_config)
+						raise
+					except Exception as e:
+						print(e)
+						self.cleanup(benchmark_config)
+					finally:
+						self.cleanup(benchmark_config)
 
 			self.cleanup(benchmark_config)
 			self.models_remaining = self.models_remaining[1:]
@@ -137,8 +162,11 @@ class BenchmarkRunner:
 
 		# Calculate score based on benchmark type
 		if benchmark_type == 'eq-bench':
-			score, parseable = calculate_eq_bench_score(benchmark.run_index, benchmark.results, './raw_results.json', fullscale=not self.args.v1)
-			benchmark_version = f"{benchmark_type}_{'v3' if self.args.v3 else 'v1' if self.args.v1 else 'v2'}{self.args.l if self.args.l != 'en' else ''}"			
+			benchmark_version_short = f"{'v3' if self.args.v3 else 'v1' if self.args.v1 else 'v2'}{self.args.l if self.args.l != 'en' else ''}"
+			benchmark_version = f"{benchmark_type}_{benchmark_version_short}"
+			#score, parseable = calculate_eq_bench_score(benchmark.run_index, benchmark.results, './raw_results.json', benchmark_version_short)
+			score, parseable = calculate_eq_bench_score(benchmark.run_index, benchmark.results, './raw_results.json', benchmark.questions, benchmark_version_short)
+			
 
 		elif benchmark_type == 'creative-writing':
 			score = calculate_creative_writing_score(benchmark.run_index, benchmark.results, './raw_results.json')
@@ -255,13 +283,16 @@ class BenchmarkRunner:
 		include_patterns = benchmark_config['include_patterns']
 		exclude_patterns = benchmark_config['exclude_patterns']
 
+		require_gpu_cleanup = False
 		if self.model:
+			require_gpu_cleanup = True
 			del self.model
 			self.model = None
 		if self.tokenizer:
 			del self.tokenizer
 			self.tokenizer = None
 		if inference_engine == 'ooba' and self.ooba_instance:
+			require_gpu_cleanup = True
 			try:
 					self.ooba_instance.stop()
 			except Exception as e:
@@ -284,8 +315,8 @@ class BenchmarkRunner:
 									delete_symlinks_and_dir(dir_to_delete, self.args.v)
 							else:
 									print('! Cache not found:', dir_to_delete)
-
-		gpu_cleanup()
+		if require_gpu_cleanup:
+			gpu_cleanup()
 
 	def final_cleanup(self):
 		if self.ooba_instance:
@@ -295,7 +326,7 @@ class BenchmarkRunner:
 		self.model = None
 		self.tokenizer = None
 		self.ooba_instance = None
-		gpu_cleanup()
+		#gpu_cleanup()
 		while is_writing:
 			print('Waiting for writes to complete...')
 			time.sleep(0.1)

@@ -1,5 +1,6 @@
 import json
 import datetime
+import tqdm
 from benchmarks.base_benchmark import BaseBenchmark
 from lib.run_query import run_query
 from lib.util import safe_dump
@@ -10,6 +11,8 @@ class CreativeWritingBench(BaseBenchmark):
 	def __init__(self, config, args, benchmark_config, runner):
 		super().__init__(config, args, benchmark_config, runner)
 		self.prompts = self.load_prompts()
+		self.total_prompts = len(self.prompts) * self.benchmark_config['n_iterations']
+		self.progress_bar = None
 
 	def get_benchmark_type(self):
 		return 'creative-writing'
@@ -54,6 +57,8 @@ class CreativeWritingBench(BaseBenchmark):
 		return f"include({include})_exclude({exclude})" if include or exclude else ""
 
 	def run(self):
+		self.progress_bar = tqdm(total=self.total_prompts, desc="Creative Writing Progress", unit="prompt")
+		
 		for run_iter in range(1, self.benchmark_config['n_iterations'] + 1):
 			print(f"Iteration {run_iter} of {self.benchmark_config['n_iterations']}")
 			self.initialize_results()
@@ -62,13 +67,16 @@ class CreativeWritingBench(BaseBenchmark):
 					if self.is_prompt_completed(prompt_id, run_iter):
 						if self.args.v:
 							print(f"Prompt {prompt_id} already complete")
+						self.progress_bar.update(1)
 						continue
 					
 					if not self.runner.model and not self.runner.ooba_instance:
 						self.runner.initialize_model_or_ooba(self.benchmark_config)
 					
 					self.process_prompt(prompt_id, prompt_data, run_iter)
+					self.progress_bar.update(1)
 
+		self.progress_bar.close()
 		self.save_results()
 		self.print_results()
 
@@ -126,7 +134,7 @@ class CreativeWritingBench(BaseBenchmark):
   
 	def print_results(self):
 		formatted_datetime = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-		print(f"----Creative Writing Benchmark Complete----")
+		print(f"\n----Creative Writing Benchmark Complete----")
 		print(formatted_datetime)
 		print('Time taken:', round((datetime.datetime.now() - self.start_time).total_seconds() / 60, 1), 'mins')
 		print('Prompt Format:', self.benchmark_config['prompt_type'])

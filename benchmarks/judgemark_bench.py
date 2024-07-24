@@ -1,5 +1,6 @@
 import json
 import datetime
+import tqdm
 from benchmarks.base_benchmark import BaseBenchmark
 from lib.util import safe_dump
 from lib.judgemark import compute_judgemark_results
@@ -10,6 +11,8 @@ class JudemarkBench(BaseBenchmark):
 		super().__init__(config, args, benchmark_config, runner)
 		self.test_model_outputs = self.load_test_model_outputs()
 		self.prompts = self.load_prompts()
+		self.total_prompts = sum(len(model_outputs) for model_outputs in self.test_model_outputs.values()) * self.benchmark_config['n_iterations']
+		self.progress_bar = None
 
 	def get_benchmark_type(self):
 		return 'judgemark'
@@ -36,6 +39,8 @@ class JudemarkBench(BaseBenchmark):
 		return f"{self.benchmark_config['run_id']}--judgemark--{self.get_judge_params()['judge_model']}"
 
 	def run(self):
+		self.progress_bar = tqdm(total=self.total_prompts, desc="Judgemark Progress", unit="prompt")
+		
 		for run_iter in range(1, self.benchmark_config['n_iterations'] + 1):
 			print(f"Iteration {run_iter} of {self.benchmark_config['n_iterations']}")
 			self.initialize_results()
@@ -44,6 +49,7 @@ class JudemarkBench(BaseBenchmark):
 					print(f'########################\nTest model: {model_name}\n########################')
 					self.process_model_outputs(model_name, model_outputs, run_iter)
 
+		self.progress_bar.close()
 		self.calculate_score()
 		self.save_results()
 		self.print_results()
@@ -69,6 +75,7 @@ class JudemarkBench(BaseBenchmark):
 			if self.is_prompt_completed(model_name, prompt_id, run_iter):
 					if self.args.v:
 						print(f'Prompt {prompt_id} already completed')
+					self.progress_bar.update(1)
 					continue
 			
 			prompt_data = self.prompts[prompt_id]
@@ -81,6 +88,8 @@ class JudemarkBench(BaseBenchmark):
 			
 			if scores:
 					safe_dump(self.results, './raw_results.json')
+			
+			self.progress_bar.update(1)
 
 	def is_prompt_completed(self, model_name, prompt_id, run_iter):
 		return (self.run_index in self.results and
