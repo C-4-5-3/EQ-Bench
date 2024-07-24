@@ -16,7 +16,6 @@ class EQBench(BaseBenchmark):
 		return 'eq-bench'
 
 	def determine_version(self):
-		return "v3"
 		if self.args.v1:
 			return "v1"
 		elif self.args.v3:
@@ -79,6 +78,7 @@ class EQBench(BaseBenchmark):
 		for run_iter in range(1, self.benchmark_config['n_iterations'] + 1):
 			print(f"Iteration {run_iter} of {self.benchmark_config['n_iterations']}")
 			self.initialize_results()
+			print(f"EQBench run after initialize_results: {self.results.keys()}")
 			
 			for question_id, question in self.questions.items():
 				if self.is_question_completed(question_id, run_iter):
@@ -170,6 +170,7 @@ class EQBench(BaseBenchmark):
 			return None
 
 	def store_v3_results(self, question_id, scores, inference, run_iter):
+		print(f"EQBench store_v3_results: {self.results.keys()}")
 		iter_results = self.results[self.run_index]['iterations'][str(run_iter)]
 		if question_id not in iter_results['respondent_answers']:
 			iter_results['respondent_answers'][question_id] = []
@@ -309,7 +310,7 @@ class EQBench(BaseBenchmark):
 			print('Lora:', self.benchmark_config['lora_path'])
 
 		lang_suffix = '_' + self.args.l if self.args.l != 'en' else ''
-		score, parseable = calculate_eq_bench_score(self.run_index, self.results, self.RAW_RESULTS_PATH, fullscale=self.eqbench_version == "v2")
+		score, parseable = calculate_eq_bench_score(self.run_index, self.results, self.RAW_RESULTS_PATH, self.eqbench_version)
 		print(f"Score ({self.eqbench_version}{lang_suffix}):", score)
 		print('Parseable:', parseable)
 

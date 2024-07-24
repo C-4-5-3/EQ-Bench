@@ -138,7 +138,8 @@ class BenchmarkRunner:
 		# Calculate score based on benchmark type
 		if benchmark_type == 'eq-bench':
 			score, parseable = calculate_eq_bench_score(benchmark.run_index, benchmark.results, './raw_results.json', fullscale=not self.args.v1)
-			benchmark_version = f"{benchmark_type}_{'v1' if self.args.v1 else 'v2'}{self.args.l if self.args.l != 'en' else ''}"
+			benchmark_version = f"{benchmark_type}_{'v3' if self.args.v3 else 'v1' if self.args.v1 else 'v2'}{self.args.l if self.args.l != 'en' else ''}"			
+
 		elif benchmark_type == 'creative-writing':
 			score = calculate_creative_writing_score(benchmark.run_index, benchmark.results, './raw_results.json')
 			parseable = 'N/A'

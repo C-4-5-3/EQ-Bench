@@ -15,7 +15,8 @@ class BaseBenchmark:
 		self.benchmark_config = benchmark_config
 		self.runner = runner
 		self.RAW_RESULTS_PATH = './raw_results.json'
-		self.results = self.load_existing_results()
+		#self.results = self.load_existing_results()
+		self.results = None
 		self.run_index = self.generate_run_index()
 		self.start_time = datetime.datetime.now()		
 
@@ -25,7 +26,7 @@ class BaseBenchmark:
 					return json.load(f)
 		return {}
 
-	def generate_run_index(self):
+	def _generate_run_index(self):
 		# Revert to original run index generation
 		components = [
 			self.benchmark_config['run_id'],
@@ -40,15 +41,17 @@ class BaseBenchmark:
 		return "--".join(components)
 
 	def initialize_results(self):
-		results = {}
+		#results = {}
+		#self.load_existing_results()
+		#self.results = self.results
 		if not self.args.w and os.path.exists(self.RAW_RESULTS_PATH):
 			with open(self.RAW_RESULTS_PATH, 'r') as f:
-					results = json.load(f)
+					self.results = json.load(f)
 			if self.get_benchmark_type() == 'eq-bench':
-					results = fix_results(results)
+					self.results = fix_results(self.results)
 
-		if self.run_index not in results:
-			results[self.run_index] = {
+		if self.run_index not in self.results:
+			self.results[self.run_index] = {
 					'run_metadata': {
 						"run_id": self.benchmark_config['run_id'],
 						"benchmark_type": self.get_benchmark_type(),
@@ -60,10 +63,11 @@ class BaseBenchmark:
 					},
 					'iterations': {}
 			}
-			self.update_benchmark_specific_metadata(results[self.run_index]['run_metadata'])
+			self.update_benchmark_specific_metadata(self.results[self.run_index]['run_metadata'])
 
-		self.initialize_iterations(results)
-		return results
+		self.initialize_iterations(self.results)
+		print(f"BaseBenchmark initialize_results: {self.results.keys()}")
+		return
 
 	def initialize_iterations(self, results):
 		if 'iterations' not in results[self.run_index]:
