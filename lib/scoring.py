@@ -145,91 +145,53 @@ def calculate_score(reference, user):
 	
 	return final_score
 
-# Calculate overall benchmark score
-def calculate_eq_bench_score(run_index, results, results_path, fullscale=False):
-	# We calculate an overall score for first pass answers and revised answers separately.
-	# The final score is the best of these two numbers.
-
-	if fullscale: # v2
-		scores_key = 'individual_scores_fullscale'
-	else: # v1 (normalised)
-		scores_key = 'individual_scores'
-
-	score_tally = 0	
+# Calculate the overall eq-bench score
+def calculate_eq_bench_score(run_index, results, results_path, version="v2"):
+	score_tally = 0    
 	parseable_tally = 0
 	n_iterations = results[run_index]['run_metadata']['total_iterations']
 	n_iterations_tallied = 0
 
-	for run_iter in results[run_index]['iterations']:		
+	for run_iter in results[run_index]['iterations']:        
 		if n_iterations_tallied >= n_iterations:
 			break
-		score_sum_first_pass = 0
-		score_sum_revised = 0
-		first_pass_parseable = 0
-		revised_parseable = 0
-
-		if not scores_key in results[run_index]['iterations'][run_iter]:
-			continue
-
-		for dialogue_id, r in results[run_index]['iterations'][run_iter][scores_key].items():
-
-			r = results[run_index]['iterations'][run_iter][scores_key][dialogue_id]
-			if 'first_pass_score' in r and r['first_pass_score'] != None:
-				score_sum_first_pass += r['first_pass_score']
-				first_pass_parseable += 1
-			if 'revised_score' in r and r['revised_score'] != None:
-				score_sum_revised += r['revised_score']
-				revised_parseable += 1
-
-		if first_pass_parseable:
-			score_first_pass = 100 * (score_sum_first_pass / first_pass_parseable / 10)
-		else:
-			score_first_pass = 0
 		
-		if revised_parseable:
-			score_revised = 100 * (score_sum_revised / revised_parseable / 10)
-		else:
-			score_revised = 0
+		score_sum = 0
+		parseable = 0
 
-		# If either the first pass or revised score has significantly less parseable answers,
-		# we take the score with the higher number of parseable answers regardless of score.
-		if score_revised >= score_first_pass and revised_parseable >= 0.95 * first_pass_parseable:
-			final_score = score_revised
-			final_parseable = revised_parseable			
+		for dialogue_id, r in results[run_index]['iterations'][run_iter]['respondent_answers'].items():
+			if version == "v3":
+					# For v3, each dialogue can have multiple scores
+					dialogue_scores = [score for score in r if score is not None]
+					if dialogue_scores:
+						score_sum += sum(dialogue_scores) / len(dialogue_scores)
+						parseable += 1
+			else:
+					if r is not None:
+						score_sum += r
+						parseable += 1
+
+		if parseable:
+			iteration_score = 100 * (score_sum / parseable / 10)
 		else:
-			final_score = score_first_pass
-			final_parseable = first_pass_parseable
-			
+			iteration_score = 0
 		
-		score_tally += final_score
-		parseable_tally += final_parseable
+		score_tally += iteration_score
+		parseable_tally += parseable
 
-		results_key = 'benchmark_results'
-		if fullscale:
-			results_key = 'benchmark_results_fullscale'
-		results[run_index]['iterations'][run_iter][results_key] = {
-			'first_pass_score': score_first_pass,
-			'first_pass_parseable': first_pass_parseable,
-			'revised_score': score_revised,
-			'revised_parseable': revised_parseable,
-			'final_score': final_score,
-			'final_parseable': final_parseable
+		results[run_index]['iterations'][run_iter]['benchmark_results'] = {
+			'score': iteration_score,
+			'parseable': parseable
 		}
 
 		n_iterations_tallied += 1
 
 	averaged_score = score_tally / n_iterations
-
-	if fullscale:
-		averaged_score = round(averaged_score, 2)	
-	else:
-		averaged_score = round(averaged_score, 2)
+	averaged_score = round(averaged_score, 2)
 	
 	safe_dump(results, results_path, max_retries=3)
-	
 
 	return (averaged_score, round(parseable_tally / n_iterations, 2))
-
 
 neg_criteria = [
 					"melodramatic", "shallow resolution", "unearned resolution",

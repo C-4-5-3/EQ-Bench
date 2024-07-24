@@ -45,7 +45,8 @@ class CreativeWritingBench(BaseBenchmark):
 			self.benchmark_config['ooba_params'],
 			self.format_include_exclude_string()
 		]
-		return "--".join(filter(None, components))
+		components = [component if component is not None else '' for component in components]
+		return "--".join(components)
 
 	def format_include_exclude_string(self):
 		include = ','.join(self.benchmark_config['include_patterns'])

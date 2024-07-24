@@ -25,7 +25,9 @@ def save_eq_bench_result_to_db(results, score, parseable, last_error, run_index,
 		meta = results['run_metadata']
 		if meta['eq_bench_version'] == 'v1':
 			n_questions_total = 60
-		else:			
+		elif meta['eq_bench_version'] == 'v3':
+			n_questions_total = len(results['iterations']['1']['respondent_answers'])  # Assuming all iterations have same number of questions
+		else:            
 			n_questions_total = 171
 
 		raw_results = {}
@@ -33,15 +35,17 @@ def save_eq_bench_result_to_db(results, score, parseable, last_error, run_index,
 		for i in range(meta['total_iterations']):
 			iter_index = str(i+1)
 			if iter_index in results['iterations']:
-				if meta['eq_bench_version'] == 'v1':
-					individual_scores = results['iterations'][iter_index]['individual_scores']
-				else:
-					individual_scores = results['iterations'][iter_index]['individual_scores_fullscale']
-				raw_results[iter_index] = {
-					'respondent_answers': results['iterations'][iter_index]['respondent_answers'],
-					'individual_scores': individual_scores,
-					'raw_inference': results['iterations'][iter_index]['raw_inference']
-				}
+					if meta['eq_bench_version'] == 'v1':
+						individual_scores = results['iterations'][iter_index]['individual_scores']
+					elif meta['eq_bench_version'] == 'v3':
+						individual_scores = results['iterations'][iter_index]['respondent_answers']
+					else:
+						individual_scores = results['iterations'][iter_index]['individual_scores_fullscale']
+					raw_results[iter_index] = {
+						'respondent_answers': results['iterations'][iter_index]['respondent_answers'],
+						'individual_scores': individual_scores,
+						'raw_inference': results['iterations'][iter_index]['raw_inference']
+					}
 
 		to_save={
 			'index_string': run_index,

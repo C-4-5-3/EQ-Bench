@@ -303,6 +303,7 @@ class BenchmarkRunner:
 def main():
 	parser = argparse.ArgumentParser(description="Run benchmark pipeline based on specified configuration.")
 	parser.add_argument('-v1', action='store_true', help="Run v1 of EQ-Bench (legacy).")
+	parser.add_argument('-v3', action='store_true', help="Run v3 of EQ-Bench (new format).")
 	parser.add_argument('-revise', action='store_true', help="Include the revision component of the test.")
 	parser.add_argument('--benchmarks', nargs='+', default=['eq-bench'],
 							help="Specify the benchmark types to run.")
