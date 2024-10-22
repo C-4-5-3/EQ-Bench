@@ -4,29 +4,41 @@ from lib.util import safe_dump
 
 # Parse the emotion intensity ratings from the raw inference text
 def parse_answers(text, REVISE):
-	first_pass_answers = {}
-	revised_answers = {}
-
-	# Strip out markdown
-	text = text.replace('*', '').replace('#', '')
-
-	# Extracting first pass answers
-	if REVISE:
-		first_pass_match = re.search(r'First pass scores:(.*?)Revised scores:', text, re.DOTALL)
-		if first_pass_match:
-			first_pass_text = first_pass_match.group(1)
-			first_pass_answers = dict(re.findall(r'(\w+):\s+(\d+)', first_pass_text))
-
-		# Extracting revised answers
-		revised_match = re.search(r'Revised scores:(.*?)$', text, re.DOTALL)
-		if revised_match:
-			revised_text = revised_match.group(1)
-			revised_answers = dict(re.findall(r'(\w+):\s+(\d+)', revised_text))
-	else:
-		first_pass_answers = dict(re.findall(r'(\w+):\s+(\d+)', text))
-		revised_answers = {}
-
-	return first_pass_answers, revised_answers
+    first_pass_answers = {}
+    revised_answers = {}
+    
+    # Strip out markdown characters
+    text = text.replace('*', '').replace('#', '')
+    
+    # Define the list of emotions to extract
+    emotions = ['Defensive', 'Eager', 'Intimidated', 'Understanding']
+    
+    if REVISE:
+        # Extracting first pass answers
+        first_pass_match = re.search(r'First pass scores:(.*?)Revised scores:', text, re.DOTALL | re.IGNORECASE)
+        if first_pass_match:
+            first_pass_text = first_pass_match.group(1)
+            for emotion in emotions:
+                match = re.search(rf'{emotion}:\s+(\d+)', first_pass_text, re.IGNORECASE)
+                if match:
+                    first_pass_answers[emotion] = match.group(1)
+        
+        # Extracting revised answers
+        revised_match = re.search(r'Revised scores:(.*?)$', text, re.DOTALL | re.IGNORECASE)
+        if revised_match:
+            revised_text = revised_match.group(1)
+            for emotion in emotions:
+                match = re.search(rf'{emotion}:\s+(\d+)', revised_text, re.IGNORECASE)
+                if match:
+                    revised_answers[emotion] = match.group(1)
+    else:
+        # When REVISE is False, extract only the first four emotion scores from the entire text
+        for emotion in emotions:
+            match = re.search(rf'{emotion}:\s+(\d+)', text, re.IGNORECASE)
+            if match:
+                first_pass_answers[emotion] = match.group(1)
+    
+    return first_pass_answers, revised_answers
 
 # we parse answers in German language ("de")
 def parse_answers_de(text, REVISE):
