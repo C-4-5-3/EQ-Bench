@@ -2,7 +2,8 @@ import re
 import math
 from lib.util import safe_dump
 
-# Parse the emotion intensity ratings from the raw inference text
+def parse_answers(text, REVISE):
+    # Parse the emotion intensity ratings from the raw inference text
     first_pass_answers = {}
     revised_answers = {}
     
@@ -32,7 +33,8 @@ from lib.util import safe_dump
     
     return first_pass_answers, revised_answers
 
-# we parse answers in German language ("de")
+def parse_answers_de(text, REVISE):
+    # we parse answers in German language ("de")
     first_pass_answers = {}
     revised_answers = {}
     
