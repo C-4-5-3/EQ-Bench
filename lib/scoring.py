@@ -3,73 +3,82 @@ import math
 from lib.util import safe_dump
 
 # Parse the emotion intensity ratings from the raw inference text
-def parse_answers(text, REVISE):
     first_pass_answers = {}
     revised_answers = {}
     
     # Strip out markdown characters
     text = text.replace('*', '').replace('#', '')
     
-    # Define the list of emotions to extract
-    emotions = ['Defensive', 'Eager', 'Intimidated', 'Understanding']
-    
     if REVISE:
-        # Extracting first pass answers
+        # Extract first pass section
         first_pass_match = re.search(r'First pass scores:(.*?)Revised scores:', text, re.DOTALL | re.IGNORECASE)
         if first_pass_match:
             first_pass_text = first_pass_match.group(1)
-            for emotion in emotions:
-                match = re.search(rf'{emotion}:\s+(\d+)', first_pass_text, re.IGNORECASE)
-                if match:
-                    first_pass_answers[emotion] = match.group(1)
-        
-        # Extracting revised answers
+            # Take only the first 4 emotion:score pairs
+            matches = re.findall(r'(\w+):\s*(\d+)', first_pass_text)
+            first_pass_answers = dict(matches[:4])
+            
+        # Extract revised section
         revised_match = re.search(r'Revised scores:(.*?)$', text, re.DOTALL | re.IGNORECASE)
         if revised_match:
             revised_text = revised_match.group(1)
-            for emotion in emotions:
-                match = re.search(rf'{emotion}:\s+(\d+)', revised_text, re.IGNORECASE)
-                if match:
-                    revised_answers[emotion] = match.group(1)
+            # Take only the first 4 emotion:score pairs
+            matches = re.findall(r'(\w+):\s*(\d+)', revised_text)
+            revised_answers = dict(matches[:4])
     else:
-        # When REVISE is False, extract only the first four emotion scores from the entire text
-        for emotion in emotions:
-            match = re.search(rf'{emotion}:\s+(\d+)', text, re.IGNORECASE)
-            if match:
-                first_pass_answers[emotion] = match.group(1)
+        # When not revising, take only the first 4 emotion:score pairs from the entire text
+        matches = re.findall(r'(\w+):\s*(\d+)', text)
+        first_pass_answers = dict(matches[:4])
     
     return first_pass_answers, revised_answers
 
 # we parse answers in German language ("de")
-def parse_answers_de(text, REVISE):
-	#print("Using german parsing.")
-	first_pass_answers = {}
-	revised_answers = {}
-
-	# Strip out markdown
-	text = text.replace('*', '').replace('#', '')
-
-	first_pass_heading_pattern = r'(Erste.*?):\s*(.*?)(?=Überarbeitete|$)'
-	revised_heading_pattern = r'(Überarbeitete.*?):\s*(.*)'
-	
-	if REVISE:
-		first_pass_match = re.search(first_pass_heading_pattern, text, re.IGNORECASE | re.DOTALL)
-		if first_pass_match:
-			first_pass_text = first_pass_match.group(2)
-			pairs = re.findall(r'([a-zA-ZäöüßÄÖÜ\s]+):\s*\**(\d+(?:,\d+)?)\**', first_pass_text)
-			first_pass_answers = {label.strip(): score.replace('*', '') for label, score in pairs}
-
-		revised_match = re.search(revised_heading_pattern, text, re.IGNORECASE | re.DOTALL)
-		if revised_match:
-			revised_text = revised_match.group(2)
-			pairs = re.findall(r'([a-zA-ZäöüßÄÖÜ\s]+):\s*\**(\d+(?:,\d+)?)\**', revised_text)
-			revised_answers = {label.strip(): score.replace('*', '') for label, score in pairs}
-	else:
-		pairs = re.findall(r'([a-zA-ZäöüßÄÖÜ\s]+):\s*\**(\d+(?:,\d+)?)\**', text)
-		first_pass_answers = {label.strip(): score.replace('*', '') for label, score in pairs}
-		revised_answers = {}
-
-	return first_pass_answers, revised_answers
+    first_pass_answers = {}
+    revised_answers = {}
+    
+    # Strip out markdown characters
+    text = text.replace('*', '').replace('#', '')
+    
+    # Patterns for section headers with more variations
+    first_pass_heading_pattern = r'(?:Erste\s+(?:Bewertungen|Einschätzungen|Werte)):\s*(.*?)(?=(?:Überarbeitete|Revidierte|$))'
+    revised_heading_pattern = r'(?:Überarbeitete|Revidierte)\s+(?:Bewertungen|Einschätzungen|Werte):\s*(.*)'
+    
+    # Pattern for emotion-score pairs, handling German characters and decimal notation
+    score_pattern = r'^\s*([a-zA-ZäöüßÄÖÜ\s]+):\s*\**(\d+(?:,\d+)?)\**\s*$'
+    
+    if REVISE:
+        # Extracting first pass answers
+        first_pass_match = re.search(first_pass_heading_pattern, text, re.IGNORECASE | re.DOTALL)
+        if first_pass_match:
+            first_pass_text = first_pass_match.group(1)
+            # Use line-based regex to capture emotion: score pairs
+            matches = re.findall(score_pattern, first_pass_text, re.MULTILINE)
+            # Take only first 4 matches and clean them
+            first_pass_answers = {
+                label.strip(): score.replace('*', '')
+                for label, score in matches[:4]
+            }
+    
+        # Extracting revised answers
+        revised_match = re.search(revised_heading_pattern, text, re.IGNORECASE | re.DOTALL)
+        if revised_match:
+            revised_text = revised_match.group(1)
+            # Use line-based regex to capture emotion: score pairs
+            matches = re.findall(score_pattern, revised_text, re.MULTILINE)
+            # Take only first 4 matches and clean them
+            revised_answers = {
+                label.strip(): score.replace('*', '')
+                for label, score in matches[:4]
+            }
+    else:
+        # When not revising, take only the first 4 emotion:score pairs from the entire text
+        matches = re.findall(score_pattern, text, re.MULTILINE)
+        first_pass_answers = {
+            label.strip(): score.replace('*', '')
+            for label, score in matches[:4]
+        }
+    
+    return first_pass_answers, revised_answers
 
 # Calculate the score for an individual question using v2 scoring system
 def calculate_score_fullscale(reference, user):
